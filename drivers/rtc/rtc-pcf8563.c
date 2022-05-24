@@ -200,6 +200,7 @@ static int pcf8563_get_datetime(struct i2c_client *client, struct rtc_time *tm)
 	struct pcf8563 *pcf8563 = i2c_get_clientdata(client);
 	unsigned char buf[9];
 	int err;
+	int timecheck = 0;
 
 	err = pcf8563_read_block_data(client, PCF8563_REG_ST1, 9, buf);
 	if (err)
@@ -219,19 +220,48 @@ static int pcf8563_get_datetime(struct i2c_client *client, struct rtc_time *tm)
 		buf[4], buf[5], buf[6], buf[7],
 		buf[8]);
 
+	do {
+		timecheck = 0;
+		tm->tm_sec = bcd2bin(buf[PCF8563_REG_SC] & 0x7F);
+		tm->tm_min = bcd2bin(buf[PCF8563_REG_MN] & 0x7F);
+		tm->tm_hour = bcd2bin(buf[PCF8563_REG_HR] & 0x3F); /* rtc hr 0-23 */
+		tm->tm_mday = bcd2bin(buf[PCF8563_REG_DM] & 0x3F);
+		tm->tm_wday = buf[PCF8563_REG_DW] & 0x07;
+		tm->tm_mon = bcd2bin(buf[PCF8563_REG_MO] & 0x1F) - 1; /* rtc mn 1-12 */
+		tm->tm_year = bcd2bin(buf[PCF8563_REG_YR]);
+		if (tm->tm_year < 70)
+			tm->tm_year += 100;	/* assume we are in 1970...2069 */
+		/* detect the polarity heuristically. see note above. */
+		pcf8563->c_polarity = (buf[PCF8563_REG_MO] & PCF8563_MO_C) ?
+			(tm->tm_year >= 100) : (tm->tm_year < 100);
 
-	tm->tm_sec = bcd2bin(buf[PCF8563_REG_SC] & 0x7F);
-	tm->tm_min = bcd2bin(buf[PCF8563_REG_MN] & 0x7F);
-	tm->tm_hour = bcd2bin(buf[PCF8563_REG_HR] & 0x3F); /* rtc hr 0-23 */
-	tm->tm_mday = bcd2bin(buf[PCF8563_REG_DM] & 0x3F);
-	tm->tm_wday = buf[PCF8563_REG_DW] & 0x07;
-	tm->tm_mon = bcd2bin(buf[PCF8563_REG_MO] & 0x1F) - 1; /* rtc mn 1-12 */
-	tm->tm_year = bcd2bin(buf[PCF8563_REG_YR]);
-	if (tm->tm_year < 70)
-		tm->tm_year += 100;	/* assume we are in 1970...2069 */
-	/* detect the polarity heuristically. see note above. */
-	pcf8563->c_polarity = (buf[PCF8563_REG_MO] & PCF8563_MO_C) ?
-		(tm->tm_year >= 100) : (tm->tm_year < 100);
+		/* Special check if year >= 138 and century is 0 (i.e. >= 2038)
+		 * Invalid time we cannot handle due to our 32bit kernel limitation so we reset
+		 * time back to 01/01/1970 00:00:00 to start ensure no issues.
+		 * This behaviour is no different if our super-cap backed RTC was discharged.
+		 */
+
+		if (tm->tm_year >= 138 && pcf8563->c_polarity == 0) {
+			timecheck = 1;
+			dev_info(&client->dev, "PCF8563 RTC does not support year >= 2038; resetting to 01/01/1970 00:00:00\n");
+			/* seconds, minute, hour, days, weekdays */
+			buf[PCF8563_REG_SC] = bin2bcd(0);
+			buf[PCF8563_REG_MN] = bin2bcd(0);
+			buf[PCF8563_REG_HR] = bin2bcd(0);
+			buf[PCF8563_REG_DM] = bin2bcd(1);
+			buf[PCF8563_REG_DW] = 4 & 0x07;	/* day of the week, thursday */
+			/* month, year, century */
+			buf[PCF8563_REG_MO] = bin2bcd(1);
+			buf[PCF8563_REG_YR] = bin2bcd(70);
+
+			pcf8563->c_polarity = (buf[PCF8563_REG_MO] & PCF8563_MO_C);
+
+			err = pcf8563_write_block_data(client, PCF8563_REG_SC,
+					9 - PCF8563_REG_SC, buf + PCF8563_REG_SC);
+			if (err)
+				return err;
+		}
+	} while(timecheck);
 
 	dev_dbg(&client->dev, "%s: tm is secs=%d, mins=%d, hours=%d, "
 		"mday=%d, mon=%d, year=%d, wday=%d\n",
