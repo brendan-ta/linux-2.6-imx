@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/err.h>
+#include <linux/crc7.h>
 
 #define DRV_VERSION "0.4.3"
 
@@ -39,9 +40,10 @@
 #define PCF8563_REG_YR		0x08
 
 #define PCF8563_REG_AMN		0x09 /* alarm */
-#define PCF8563_REG_BC		0x0A /* rtc bootcount */
+#define PCF8563_REG_CRC		0x09 /* rtc bootcount crc7*/
+#define PCF8563_REG_MAGIC	0x0A /* bootcount magic reg */
+#define PCF8563_REG_BC		0x0B /* rtc bootcount */
 #define PCF8563_BC_MAGIC	0xBC /* bootcount magic signature */
-#define PCF8563_REG_MAGIC	0x09 /* bootcount magic reg */
 
 #define PCF8563_REG_CLKO	0x0D /* clock out */
 #define PCF8563_REG_TMRC	0x0E /* timer control */
@@ -400,16 +402,23 @@ static int pcf8563_irq_enable(struct device *dev, unsigned int enabled)
 
 static int pcf8563_read_bootcount(struct i2c_client *client)
 {
-	s32 magic;
-	int result = 0;
+	unsigned char buf[3];
+	int err;
 
-	magic = i2c_smbus_read_byte_data(client, PCF8563_REG_MAGIC);
-	if ( magic == PCF8563_BC_MAGIC ) {
-		   result = i2c_smbus_read_byte_data(client, PCF8563_REG_BC);
-	} else {
-		   result = -1;
+	err = pcf8563_read_block_data(client, PCF8563_REG_CRC, 3, buf);
+	if (err)
+		return err;
+
+	buf[0] &= 0x7F;
+	buf[1] &= 0x3F;
+	buf[2] &= 0x3F;
+
+	// Return bootcount if signature and crc match
+	if (buf[1] == (PCF8563_BC_MAGIC & 0x3F) && buf[0] == crc7_uboot(0, &buf[1], 2)) {
+		return buf[2];
 	}
-	return result;
+
+	return -1;
 }
 
 static ssize_t pcf8563_attribute_show_bootcount(struct device *dev, struct device_attribute *attr, char *buf)
@@ -429,19 +438,30 @@ static ssize_t pcf8563_attribute_store_bootcount(struct device *dev,
 				 struct device_attribute *attr,
 				 const char *buf, size_t count)
 {
-	s32 error;
-	struct pcf8563 *pcf8563;
-	pcf8563 = dev_get_drvdata(dev);
+	s32 err;
+	struct i2c_client *client = to_i2c_client(dev);
+	unsigned char buff[3];
+	unsigned char tmpbuf[3];
 
-	error = i2c_smbus_write_byte_data(pcf8563->client, PCF8563_REG_MAGIC, 0xbc);
-	if ( error < 0 ) {
-		dev_err(dev, "Could not write bootcount magic value\n");
-	}
+	err = pcf8563_read_block_data(client, PCF8563_REG_CRC, 3, buff);
+	if (err)
+		return err;
 
-	error = i2c_smbus_write_byte_data(pcf8563->client, PCF8563_REG_BC, 0);
-	if ( error < 0 ) {
-		dev_err(dev, "Could not clear bootcount\n");
-	}
+	buff[0] &= 0x80;
+	buff[1] &= 0x80;
+	buff[2] &= 0x80;
+
+	tmpbuf[1] = (PCF8563_BC_MAGIC & 0x3f);
+	tmpbuf[2] = (0 & 0x3f);
+	tmpbuf[0] = crc7_uboot(0, (&tmpbuf[1]), 2);
+
+	buff[0] |= tmpbuf[0];
+	buff[1] |= tmpbuf[1];
+	buff[2] |= tmpbuf[2];
+
+	err = pcf8563_write_block_data(client, PCF8563_REG_CRC, 3, buff);
+	if (err)
+		return err;
 
 	return count;
 }
