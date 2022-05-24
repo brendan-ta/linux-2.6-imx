@@ -235,13 +235,14 @@ static int pcf8563_get_datetime(struct i2c_client *client, struct rtc_time *tm)
 		pcf8563->c_polarity = (buf[PCF8563_REG_MO] & PCF8563_MO_C) ?
 			(tm->tm_year >= 100) : (tm->tm_year < 100);
 
-		/* Special check if year >= 138 and century is 0 (i.e. >= 2038)
+		/* Special check if year >= 138 and century is 0 (i.e. >= 2038), any year <70 will equate to year+=100
+		 * therefore it is sufficient that we just check this and disregard C polarity completely.
 		 * Invalid time we cannot handle due to our 32bit kernel limitation so we reset
 		 * time back to 01/01/1970 00:00:00 to start ensure no issues.
 		 * This behaviour is no different if our super-cap backed RTC was discharged.
 		 */
 
-		if (tm->tm_year >= 138 && pcf8563->c_polarity == 0) {
+		if (tm->tm_year >= 138) {
 			timecheck = 1;
 			dev_info(&client->dev, "PCF8563 RTC does not support year >= 2038; resetting to 01/01/1970 00:00:00\n");
 			/* seconds, minute, hour, days, weekdays */
