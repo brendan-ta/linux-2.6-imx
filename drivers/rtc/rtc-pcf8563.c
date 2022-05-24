@@ -39,6 +39,9 @@
 #define PCF8563_REG_YR		0x08
 
 #define PCF8563_REG_AMN		0x09 /* alarm */
+#define PCF8563_REG_BC		0x0A /* rtc bootcount */
+#define PCF8563_BC_MAGIC	0xBC /* bootcount magic signature */
+#define PCF8563_REG_MAGIC	0x09 /* bootcount magic reg */
 
 #define PCF8563_REG_CLKO	0x0D /* clock out */
 #define PCF8563_REG_TMRC	0x0E /* timer control */
@@ -395,6 +398,76 @@ static int pcf8563_irq_enable(struct device *dev, unsigned int enabled)
 	return pcf8563_set_alarm_mode(to_i2c_client(dev), !!enabled);
 }
 
+static int pcf8563_read_bootcount(struct i2c_client *client)
+{
+	s32 magic;
+	int result = 0;
+
+	magic = i2c_smbus_read_byte_data(client, PCF8563_REG_MAGIC);
+	if ( magic == PCF8563_BC_MAGIC ) {
+		   result = i2c_smbus_read_byte_data(client, PCF8563_REG_BC);
+	} else {
+		   result = -1;
+	}
+	return result;
+}
+
+static ssize_t pcf8563_attribute_show_bootcount(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	s32 count;
+	s32 bootcount;
+	struct pcf8563 *pcf8563;
+	pcf8563 = dev_get_drvdata(dev);
+
+	bootcount = pcf8563_read_bootcount(pcf8563->client);
+	count = sprintf(buf, "%d\n", bootcount);
+
+	return count;
+}
+
+static ssize_t pcf8563_attribute_store_bootcount(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	s32 error;
+	struct pcf8563 *pcf8563;
+	pcf8563 = dev_get_drvdata(dev);
+
+	error = i2c_smbus_write_byte_data(pcf8563->client, PCF8563_REG_MAGIC, 0xbc);
+	if ( error < 0 ) {
+		dev_err(dev, "Could not write bootcount magic value\n");
+	}
+
+	error = i2c_smbus_write_byte_data(pcf8563->client, PCF8563_REG_BC, 0);
+	if ( error < 0 ) {
+		dev_err(dev, "Could not clear bootcount\n");
+	}
+
+	return count;
+}
+
+#define PCF8563_ATTR_RW(_name, _mode)				\
+	struct device_attribute pcf8563_attribute_##_name =	\
+		__ATTR(pcf8563_##_name, _mode,		\
+			  pcf8563_attribute_show_##_name,	\
+			  pcf8563_attribute_store_##_name)
+
+static PCF8563_ATTR_RW(bootcount, S_IRUGO|S_IWUSR);
+
+static struct attribute *pcf8563_default_attrs[] = {
+	&pcf8563_attribute_bootcount.attr,
+	NULL
+};
+
+static struct attribute_group pcf8563_defattr_group = {
+	.attrs = pcf8563_default_attrs,
+};
+
+int pcf8563_create_attributes(struct device * dev)
+{
+	return sysfs_create_group(&dev->kobj, &pcf8563_defattr_group);
+}
+
 static const struct rtc_class_ops pcf8563_rtc_ops = {
 	.ioctl		= pcf8563_rtc_ioctl,
 	.read_time	= pcf8563_rtc_read_time,
@@ -462,6 +535,11 @@ static int pcf8563_probe(struct i2c_client *client,
 			return err;
 		}
 
+	}
+
+	err = pcf8563_create_attributes(&client->dev);
+	if (err) {
+		   dev_err(&client->dev, "Could not create required attribute file\n");
 	}
 
 	/* the pcf8563 alarm only supports a minute accuracy */
